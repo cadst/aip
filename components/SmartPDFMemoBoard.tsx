@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Rnd } from 'react-rnd'
 import { Document, Page, pdfjs } from 'react-pdf'
 import ReactFlow, {
@@ -16,6 +16,7 @@ import ReactFlow, {
   Node,
 } from 'reactflow'
 import 'reactflow/dist/style.css'
+import 'react-pdf/dist/esm/Page/TextLayer.css';
 
 pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.js'
 
@@ -27,7 +28,16 @@ type Chunk = {
   height: number
   text: string
   group?: string
+  color: string
+  references: {
+    page: number
+    x: number
+    y: number
+    width: number
+    height: number
+  }
 }
+
 
 export default function SmartPDFMemoBoard() {
   const [file, setFile] = useState<File | null>(null)
@@ -37,6 +47,8 @@ export default function SmartPDFMemoBoard() {
   const [query, setQuery] = useState<string>("")
 
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
+
+  const [selectedNode, setSelectedNode] = useState<Node | null>(null)
 
   // ✅ 청크를 ReactFlow 노드로 매핑
   const nodes: Node[] = chunks.map(chunk => ({
@@ -54,6 +66,13 @@ export default function SmartPDFMemoBoard() {
         <pre className="whitespace-pre-wrap">{chunk.text}</pre>
       </div>
     ),
+    references: {
+      page: chunk.references.page,
+      x: chunk.references.x,
+      y: chunk.references.y,
+      width: chunk.references.width,
+      height: chunk.references.height
+    }
   },
     position: { x: chunk.x, y: chunk.y },
     style: {
@@ -67,8 +86,28 @@ export default function SmartPDFMemoBoard() {
     },
   }))
 
+
+  const extractTextFromPdf = async (pdfUrl: string): Promise<string[]> => {
+  const loadingTask = pdfjs.getDocument(pdfUrl)
+  const pdf = await loadingTask.promise
+
+  const texts: string[] = []
+
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i)
+    const content = await page.getTextContent()
+    const pageText = content.items.map(item => ('str' in item ? item.str : '')).join(' ')
+    texts.push(pageText)
+  }
+
+  return texts // 페이지별 텍스트 배열 반환
+}
   const handleDeleteChunk = (id: string) => {
   setChunks(prev => prev.filter(chunk => chunk.id !== id))
+  setSelectedNode(prevSelected => {
+    if (prevSelected?.id === id) return null
+    return prevSelected
+  })
   setEdges(prev => prev.filter(edge => edge.source !== id && edge.target !== id))
 }
 
@@ -94,11 +133,22 @@ export default function SmartPDFMemoBoard() {
 
   const onConnect = (params: Edge | Connection) => setEdges(eds => addEdge(params, eds))
   const onEdgeClick = (_: any, edge: Edge) => setEdges(eds => eds.filter(e => e.id !== edge.id))
-
+  const onNodeClick = (_: any, node: Node) => {
+    console.log(node)
+    const select = nodes.find(n => n.id === node.id)
+    if (select){
+      setSelectedNode(select);
+    } else {
+      setSelectedNode(null);
+    }
+    setPageNumber(node.data.references.page)
+  }
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0]
-    if (selectedFile) setFile(selectedFile)
-  }
+    if (selectedFile){
+      setFile(selectedFile)
+      } 
+   }
 
   const generateLLMResponse = async (query: string): Promise<string> => {
     return `LLM 응답 (예시): "${query}"에 대한 답변입니다.`
@@ -116,6 +166,13 @@ export default function SmartPDFMemoBoard() {
       height: 140,
       text: combinedText,
       color: getRandomColor(),
+      references: {
+        page: pageNumber,
+        x: 50 + chunks.length * 30,
+      y: 50 + chunks.length * 30,
+      width: 260,
+      height: 140,
+      }
     }
     setChunks(prev => [...prev, newChunk])
     setQuery("")
@@ -131,12 +188,26 @@ export default function SmartPDFMemoBoard() {
         <div className="border w-[700px] h-[800px] relative bg-white overflow-auto">
           {file && (
             <Document file={file} onLoadSuccess={onDocumentLoadSuccess}>
-              <Page pageNumber={pageNumber} width={0} style={{ opacity: 0, pointerEvents: 'none' }} />
+              <Page pageNumber={pageNumber} renderAnnotationLayer={false} />
+              {selectedNode && selectedNode.data.references.page === pageNumber ? (
+                <div 
+                  key={selectedNode.id}
+                  style={{
+                    position: 'absolute',
+                    top: selectedNode.data.references.y,
+                    left: selectedNode.data.references.x,
+                    width: selectedNode.data.references.width,
+                    height: selectedNode.data.references.height,
+                    backgroundColor: 'rgba(255,255,0,0.4)',
+                  }}
+                />
+              ) : <div />}
             </Document>
           )}
-          <div className="absolute bottom-2 left-2 bg-white p-1 rounded shadow">
+          <div className="sticky bottom-2 left-2 bg-white p-1 rounded shadow">
             <button
-              onClick={() => setPageNumber((p) => Math.max(p - 1, 1))}
+              onClick={() => setPageNumber((p) => Math.max(p - 1, 1))
+              }
               disabled={pageNumber <= 1}
               className="px-2"
             >
@@ -161,6 +232,7 @@ export default function SmartPDFMemoBoard() {
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
+              onNodeClick={onNodeClick}
               onEdgeClick={onEdgeClick}
               fitView
             >
@@ -172,18 +244,18 @@ export default function SmartPDFMemoBoard() {
         </div>
       </div>
 
-      <div className="space-y-2">
+      <div className="flex items-center p-2 border-t bg-white">
         <textarea
-          placeholder="PDF를 참고할 질문을 입력하세요..."
+          placeholder="질문을 입력하세요"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          className="w-full h-20 p-2 border rounded resize-none"
+          className="flex-1 px-3 py-2 border rounded-1-md"
         />
         <button
           onClick={createQueryResponseChunk}
-          className="bg-purple-600 text-white px-4 py-2 rounded"
+          className="px-3 py-2 bg-black text-white rounded"
         >
-          AI 답변 생성 후 청크 만들기
+          ↑
         </button>
       </div>
     </div>
